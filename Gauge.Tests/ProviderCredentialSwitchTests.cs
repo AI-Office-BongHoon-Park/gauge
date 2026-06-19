@@ -50,7 +50,7 @@ public sealed class ProviderCredentialSwitchTests
     [Fact]
     public async Task ClaudeParsesSpendWhenWindowsAreNull()
     {
-        var json = """{"five_hour":null,"seven_day":null,"spend":{"used":25,"limit":{"amount":100},"percent":25,"severity":"ok","enabled":true,"disabled_reason":null}}""";
+        var json = """{"five_hour":null,"seven_day":null,"spend":{"used":{"amount_minor":2500,"currency":"USD","exponent":2},"limit":{"amount_minor":10000,"currency":"USD","exponent":2},"percent":25,"severity":"ok","enabled":true,"disabled_reason":null}}""";
         var provider = new ClaudeProvider(new HttpClient(new CountingHandler(json: json)), new MutableSource("token"));
 
         var snapshot = await provider.GetSnapshotAsync(default);

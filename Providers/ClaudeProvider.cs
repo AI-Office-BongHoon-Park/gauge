@@ -207,6 +207,7 @@ public sealed class ClaudeProvider : IUsageProvider
             + $"sevenDayShape={ObjectShape(root, "seven_day")} "
             + $"spendKind={PropertyKind(root, "spend")} "
             + $"spendShape={ObjectShape(root, "spend")} "
+            + $"spendUsedShape={ObjectShape(root.GetObjectOrNull("spend"), "used")} "
             + $"spendLimitShape={ObjectShape(root.GetObjectOrNull("spend"), "limit")}");
 
         var windows = new List<UsageWindow>();
@@ -299,13 +300,15 @@ public sealed class ClaudeProvider : IUsageProvider
             return null;
         }
 
-        var used = GetDouble(spend, "used");
-        var limit = GetSpendLimit(spend);
+        var used = GetMoney(spend, "used")?.Amount ?? GetDouble(spend, "used");
+        var limitMoney = GetMoney(spend, "limit");
+        var limit = limitMoney?.Amount ?? GetSpendLimit(spend);
         var remaining = limit is { } l && used is { } u ? Math.Max(0, l - u) : (double?)null;
+        var currency = limitMoney?.Currency;
         var detail = remaining is { } r && limit is { } total
-            ? $"잔액 {FormatMoney(r)} / {FormatMoney(total)}"
+            ? $"잔액 {FormatMoney(r, currency)} / {FormatMoney(total, currency)}"
             : used is { } spent && limit is { } totalOnly
-                ? $"{FormatMoney(spent)} / {FormatMoney(totalOnly)}"
+                ? $"{FormatMoney(spent, currency)} / {FormatMoney(totalOnly, currency)}"
                 : null;
 
         return new UsageWindow
@@ -376,5 +379,22 @@ public sealed class ClaudeProvider : IUsageProvider
         return null;
     }
 
-    private static string FormatMoney(double value) => $"${value:0.##}";
+    private static (double Amount, string? Currency)? GetMoney(JsonElement element, string property)
+    {
+        if (element.GetObjectOrNull(property) is not { } money
+            || GetDouble(money, "amount_minor") is not { } minor)
+        {
+            return null;
+        }
+
+        var exponent = GetDouble(money, "exponent") ?? 0;
+        var amount = minor / Math.Pow(10, exponent);
+        var currency = money.GetStringOrNull("currency");
+        return (amount, currency);
+    }
+
+    private static string FormatMoney(double value, string? currency)
+        => string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(currency)
+            ? $"${value:0.##}"
+            : $"{value:0.##} {currency}";
 }
