@@ -39,6 +39,23 @@ Gauge는 Claude Code, Codex, Cursor의 실제 사용량 한도를 손쉽게 확�
 서명되지 않은 로컬 빌드에서는 Windows SmartScreen의 알 수 없는 게시자 경고가 나타날 수 있습니다.
 
 
+## 로컬 빌드
+
+Windows에서 .NET 10 SDK와 PowerShell 7을 설치한 뒤 실행합니다.
+
+```powershell
+pwsh -File build-portable.ps1
+```
+
+결과물은 `dist\GaugePortable-win-x64.zip`입니다. 압축을 풀고 `Gauge\Gauge.exe`를 실행하면 설치 없이 사용할 수 있습니다.
+
+설치 프로그램까지 만들 때만 Inno Setup 6을 설치하고 아래 명령을 사용합니다.
+
+```powershell
+pwsh -File build-installer.ps1
+```
+
+
 ## 로그인과 데이터
 
 Gauge는 자격증명을 직접 발급하거나 갱신하지 않습니다. 각 공식 CLI가 관리하는 파일을 읽기 전용으로 사용합니다.
@@ -59,6 +76,8 @@ Cursor는 별도 CLI 로그인이 없으며, Cursor 앱에 로그인하면 Gauge
 Gauge는 시작 시 GitHub의 최신 Release를 조용히 확인하고, 새 버전이 있으면 설정 화면의 **업데이트** 카드에 표시합니다. 카드의 **업데이트 확인** 버튼으로 수동 확인도 가능합니다.
 
 새 버전이 있을 때 **지금 업데이트**를 누르면 설치 프로그램을 내려받아 자동(무인) 모드로 실행합니다. 실행 중인 Gauge가 종료되고, 같은 위치에 새 버전이 설치된 뒤 자동으로 다시 시작됩니다. 관리자 권한은 필요하지 않습니다.
+
+문제 확인용 로그는 `%LOCALAPPDATA%\Gauge\gauge.log`에 기록됩니다. OAuth 토큰과 계정 ID는 기록하지 않습니다.
 
 
 ## 현재 제한 사항

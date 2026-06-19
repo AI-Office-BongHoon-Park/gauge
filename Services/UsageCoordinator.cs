@@ -79,6 +79,7 @@ public sealed class UsageCoordinator : IDisposable
             && Environment.TickCount64 - lastStarted < ForcedRefreshDebounce.TotalMilliseconds)
         {
             // Within the debounce window: show the cached value, don't re-fetch.
+            AppLog.Write($"Usage refresh skipped by debounce reason={reason}");
             EmitState();
             return;
         }
@@ -121,14 +122,23 @@ public sealed class UsageCoordinator : IDisposable
             : await _refreshGate.WaitAsync(0, cancellationToken);
         if (!entered)
         {
+            AppLog.Write("Usage refresh skipped: another refresh is running");
             EmitState();
             return;
         }
 
         try
         {
+            AppLog.Write("Usage refresh started");
             Interlocked.Exchange(ref _lastRefreshStartedTick, Environment.TickCount64);
             var results = await _usageService.GetAllSnapshotsAsync(cancellationToken);
+            AppLog.Write($"Usage refresh providers finished success={results.Count(r => r.Succeeded)} failed={results.Count(r => !r.Succeeded)}");
+            foreach (var result in results)
+            {
+                AppLog.Write(result.Succeeded
+                    ? $"Usage provider result tool={result.ToolName} windows={result.Snapshot!.Windows.Count} plan={result.Snapshot.Plan ?? "<missing>"}"
+                    : $"Usage provider result tool={result.ToolName} error={result.Error!.GetType().Name}: {result.Error.Message}");
+            }
             MergeIntoCache(results);
             ReportAuthenticationFailures(results);
             EmitState();

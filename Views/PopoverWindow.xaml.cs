@@ -25,6 +25,7 @@ public sealed partial class PopoverWindow : Window
     // --- Layout (device-independent pixels; scaled by DPI at placement time) ---
     private const double PopoverWidthDip = 360;
     private const double PopoverHeightDip = 480; // fallback height before content is measured
+    private const double MinPopoverHeightDip = 360;
     // Hard cap on the popover's height. Content taller than this scrolls inside
     // BodyScroll instead of growing the window; the footer bar stays pinned. ~800
     // keeps the popover comfortable even on a 1080p display.
@@ -358,6 +359,7 @@ public sealed partial class PopoverWindow : Window
         {
             contentHeightDip = PopoverHeightDip; // fallback before first layout
         }
+        contentHeightDip = Math.Max(contentHeightDip, MinPopoverHeightDip);
 
         // WorkArea is physical pixels; convert DIP sizes with the captured DPI.
         var width = (int)Math.Round(PopoverWidthDip * _scale);

@@ -1,9 +1,9 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using System.Security.Cryptography;
 using System.Text;
+using System.Globalization;
 using Gauge.Models;
 using Gauge.Providers.Internal;
 using Gauge.Services;
@@ -78,6 +78,7 @@ public sealed class ClaudeProvider : IUsageProvider
         var credentialResult = await _credentials.ReadAsync(ToolKind.ClaudeCode, cancellationToken);
         var credentials = credentialResult.Credential;
         var now = Environment.TickCount64;
+        AppLog.Write($"Claude refresh credentialStatus={credentialResult.Status} hasToken={credentials?.AccessToken is { Length: > 0 }} plan={credentials?.Plan ?? "<missing>"}");
 
         // A CLI re-login/account switch must not serve the prior account's 5-minute
         // cache. Keep only a one-way fingerprint, never the token itself.
@@ -86,6 +87,7 @@ public sealed class ClaudeProvider : IUsageProvider
             : null;
         if (_credentialFingerprintInitialized && !StringComparer.Ordinal.Equals(_credentialFingerprint, fingerprint))
         {
+            AppLog.Write("Claude credential changed: clearing cached snapshot");
             _lastSnapshot = null;
             _lastSuccessTick = 0;
             _cooldownUntilTick = 0;
@@ -96,6 +98,7 @@ public sealed class ClaudeProvider : IUsageProvider
 
         if (credentialResult.Status == CredentialReadStatus.Invalid)
         {
+            AppLog.Write("Claude refresh rejected: invalid credential");
             throw new AuthenticationRequiredException(ToolKind.ClaudeCode, HttpStatusCode.Unauthorized);
         }
 
@@ -106,6 +109,7 @@ public sealed class ClaudeProvider : IUsageProvider
         var fetchedRecently = _lastSuccessTick != 0 && now - _lastSuccessTick < MinFetchInterval.TotalMilliseconds;
         if (_lastSnapshot is not null && (inCooldown || fetchedRecently))
         {
+            AppLog.Write($"Claude refresh served from cache inCooldown={inCooldown} fetchedRecently={fetchedRecently} windows={_lastSnapshot.Windows.Count}");
             return _lastSnapshot with { Plan = credentials?.Plan ?? _lastSnapshot.Plan };
         }
 
@@ -113,6 +117,7 @@ public sealed class ClaudeProvider : IUsageProvider
         {
             // No usable token: report the plan (if known) with no windows. Don't throw,
             // so this reads as "no data yet" rather than a transient failure.
+            AppLog.Write("Claude refresh skipped: missing token");
             return new UsageSnapshot
             {
                 ToolName = ToolName,
@@ -125,6 +130,7 @@ public sealed class ClaudeProvider : IUsageProvider
         try
         {
             var windows = await FetchWindowsAsync(token, cancellationToken);
+            AppLog.Write($"Claude usage refresh succeeded windows={windows.Count}");
             _consecutive429 = 0;
             _cooldownUntilTick = 0;
             _lastSuccessTick = Environment.TickCount64;
@@ -142,25 +148,28 @@ public sealed class ClaudeProvider : IUsageProvider
             _consecutive429++;
             var cooldown = NextCooldown(_consecutive429);
             _cooldownUntilTick = Environment.TickCount64 + (long)cooldown.TotalMilliseconds;
-            Debug.WriteLine($"[Gauge] ClaudeProvider 429 (x{_consecutive429}); backing off {cooldown.TotalMinutes:0}m");
+            AppLog.Write($"Claude refresh throttled status=429 consecutive={_consecutive429} cooldownMinutes={cooldown.TotalMinutes:0}");
 
             // Keep showing the last good value if we have one; only surface a failure
             // on a cold start with nothing cached.
             if (_lastSnapshot is not null)
             {
+                AppLog.Write($"Claude refresh served cached snapshot after 429 windows={_lastSnapshot.Windows.Count}");
                 return _lastSnapshot with { Plan = credentials.Plan ?? _lastSnapshot.Plan };
             }
             throw;
         }
         catch (HttpRequestException ex) when (ex.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
         {
+            AppLog.Write($"Claude refresh auth failed: status={(int)ex.StatusCode!.Value}");
             throw new AuthenticationRequiredException(ToolKind.ClaudeCode, ex.StatusCode!.Value);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            Debug.WriteLine($"[Gauge] ClaudeProvider usage fetch failed: {ex.Message}");
+            AppLog.Write($"Claude refresh failed: {ex.GetType().Name}: {ex.Message}");
             if (_lastSnapshot is not null)
             {
+                AppLog.Write($"Claude refresh served cached snapshot after failure windows={_lastSnapshot.Windows.Count}");
                 return _lastSnapshot with { Plan = credentials.Plan ?? _lastSnapshot.Plan };
             }
             throw;
@@ -182,12 +191,24 @@ public sealed class ClaudeProvider : IUsageProvider
         request.Headers.TryAddWithoutValidation("anthropic-beta", OAuthBetaHeader);
         request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
 
+        AppLog.Write("Claude usage request started");
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        AppLog.Write($"Claude usage response status={(int)response.StatusCode}");
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var document = await JsonDocument.ParseAsync(stream, default, cancellationToken);
         var root = document.RootElement;
+        AppLog.Write("Claude usage parsed "
+            + $"rootKeys={SafeKeys(root)} "
+            + $"fiveHourKind={PropertyKind(root, "five_hour")} "
+            + $"fiveHourShape={ObjectShape(root, "five_hour")} "
+            + $"sevenDayKind={PropertyKind(root, "seven_day")} "
+            + $"sevenDayShape={ObjectShape(root, "seven_day")} "
+            + $"spendKind={PropertyKind(root, "spend")} "
+            + $"spendShape={ObjectShape(root, "spend")} "
+            + $"spendUsedShape={ObjectShape(root.GetObjectOrNull("spend"), "used")} "
+            + $"spendLimitShape={ObjectShape(root.GetObjectOrNull("spend"), "limit")}");
 
         var windows = new List<UsageWindow>();
         if (ParseWindow(root, "five_hour", UsageWindowType.FiveHour, "5시간") is { } fiveHour)
@@ -198,8 +219,43 @@ public sealed class ClaudeProvider : IUsageProvider
         {
             windows.Add(weekly);
         }
+        if (windows.Count == 0 && ParseSpend(root) is { } spend)
+        {
+            windows.Add(spend);
+        }
 
         return windows;
+    }
+
+    private static string SafeKeys(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return "<none>";
+        }
+
+        var keys = element.EnumerateObject().Select(property => property.Name).Take(24);
+        return string.Join(",", keys);
+    }
+
+    private static string PropertyKind(JsonElement element, string property)
+        => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value)
+            ? value.ValueKind.ToString()
+            : "<missing>";
+
+    private static string ObjectShape(JsonElement? element, string property)
+    {
+        if (element is not { ValueKind: JsonValueKind.Object } obj
+            || !obj.TryGetProperty(property, out var value)
+            || value.ValueKind != JsonValueKind.Object)
+        {
+            return "<none>";
+        }
+
+        var parts = value.EnumerateObject()
+            .Take(24)
+            .Select(item => $"{item.Name}:{item.Value.ValueKind}");
+        return string.Join(",", parts);
     }
 
     /// <summary>
@@ -208,8 +264,21 @@ public sealed class ClaudeProvider : IUsageProvider
     /// </summary>
     private static UsageWindow? ParseWindow(JsonElement root, string property, UsageWindowType type, string label)
     {
-        if (root.GetObjectOrNull(property) is not { } window
-            || window.GetDoubleOrNull("utilization") is not { } utilization)
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty(property, out var window))
+        {
+            return null;
+        }
+
+        var utilization = GetDouble(window, "utilization", "used_percent", "percent_used", "percentage", "percent");
+        var nested = window.ValueKind == JsonValueKind.Object && utilization is null
+            ? FirstObject(window)
+            : null;
+        if (utilization is null && nested is { } nestedObject)
+        {
+            utilization = GetDouble(nestedObject, "utilization", "used_percent", "percent_used", "percentage", "percent");
+        }
+
+        if (utilization is not { } percent)
         {
             return null;
         }
@@ -217,9 +286,115 @@ public sealed class ClaudeProvider : IUsageProvider
         return new UsageWindow
         {
             Type = type,
-            UsedRatio = Math.Clamp(utilization / 100.0, 0.0, 1.0),
+            UsedRatio = Math.Clamp(percent / 100.0, 0.0, 1.0),
             Label = label,
-            ResetTime = window.GetDateTimeOffsetOrNull("resets_at"),
+            ResetTime = GetResetTime(window) ?? (nested is { } nestedWindow ? GetResetTime(nestedWindow) : null),
         };
     }
+
+    private static UsageWindow? ParseSpend(JsonElement root)
+    {
+        if (root.GetObjectOrNull("spend") is not { } spend
+            || GetDouble(spend, "percent") is not { } percent)
+        {
+            return null;
+        }
+
+        var used = GetMoney(spend, "used")?.Amount ?? GetDouble(spend, "used");
+        var limitMoney = GetMoney(spend, "limit");
+        var limit = limitMoney?.Amount ?? GetSpendLimit(spend);
+        var remaining = limit is { } l && used is { } u ? Math.Max(0, l - u) : (double?)null;
+        var currency = limitMoney?.Currency;
+        var detail = remaining is { } r && limit is { } total
+            ? $"잔액 {FormatMoney(r, currency)} / {FormatMoney(total, currency)}"
+            : used is { } spent && limit is { } totalOnly
+                ? $"{FormatMoney(spent, currency)} / {FormatMoney(totalOnly, currency)}"
+                : null;
+
+        return new UsageWindow
+        {
+            Type = UsageWindowType.BillingCycle,
+            UsedRatio = Math.Clamp(percent / 100.0, 0.0, 1.0),
+            Label = "예산",
+            DetailText = detail,
+        };
+    }
+
+    private static double? GetSpendLimit(JsonElement spend)
+    {
+        if (GetDouble(spend, "limit") is { } direct)
+        {
+            return direct;
+        }
+
+        return spend.GetObjectOrNull("limit") is { } limit
+            ? GetDouble(limit, "amount", "value", "usd", "limit", "total", "hard_limit", "soft_limit")
+            : null;
+    }
+
+    private static JsonElement? FirstObject(JsonElement element)
+    {
+        foreach (var property in element.EnumerateObject())
+        {
+            if (property.Value.ValueKind == JsonValueKind.Object)
+            {
+                return property.Value;
+            }
+        }
+
+        return null;
+    }
+
+    private static DateTimeOffset? GetResetTime(JsonElement element)
+        => element.GetDateTimeOffsetOrNull("resets_at")
+           ?? element.GetDateTimeOffsetOrNull("reset_at")
+           ?? element.GetDateTimeOffsetOrNull("reset_time");
+
+    private static double? GetDouble(JsonElement element, params string[] properties)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        foreach (var property in properties)
+        {
+            if (!element.TryGetProperty(property, out var value))
+            {
+                continue;
+            }
+
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number))
+            {
+                return number;
+            }
+
+            if (value.ValueKind == JsonValueKind.String
+                && double.TryParse(value.GetString(), NumberStyles.Number, CultureInfo.InvariantCulture, out number))
+            {
+                return number;
+            }
+        }
+
+        return null;
+    }
+
+    private static (double Amount, string? Currency)? GetMoney(JsonElement element, string property)
+    {
+        if (element.GetObjectOrNull(property) is not { } money
+            || GetDouble(money, "amount_minor") is not { } minor)
+        {
+            return null;
+        }
+
+        var exponent = GetDouble(money, "exponent") ?? 0;
+        var amount = minor / Math.Pow(10, exponent);
+        var currency = money.GetStringOrNull("currency");
+        return (amount, currency);
+    }
+
+    private static string FormatMoney(double value, string? currency)
+        => string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(currency)
+            ? $"${value:0.##}"
+            : $"{value:0.##} {currency}";
 }
