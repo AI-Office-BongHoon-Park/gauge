@@ -29,6 +29,25 @@ public sealed class CodexProviderTests
         Assert.Equal(0.575, window.UsedRatio, 3);
     }
 
+    [Fact]
+    public async Task ParsesNumericCreditBalance()
+    {
+        const string json = """
+        {
+          "plan_type": "enterprise",
+          "credits": { "balance": 25 },
+          "spend_control": { "individual_limit": "100" }
+        }
+        """;
+        var provider = new CodexProvider(new HttpClient(new StubHandler(json)), Source());
+
+        var snapshot = await provider.GetSnapshotAsync(default);
+
+        var window = Assert.Single(snapshot.Windows);
+        Assert.Equal("잔액 $25", window.DetailText);
+        Assert.Equal(0.75, window.UsedRatio, 3);
+    }
+
     private static ICredentialSource Source() => new StubSource(
         new CredentialReadResult
         {

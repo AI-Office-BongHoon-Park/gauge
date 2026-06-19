@@ -110,7 +110,7 @@ public sealed class CodexProvider : IUsageProvider
 
         var planType = root.GetStringOrNull("plan_type");
         var plan = MapPlan(planType);
-        AppLog.Write($"Codex usage parsed planType={planType ?? "<missing>"} plan={plan ?? "<missing>"} hasRateLimit={root.GetObjectOrNull("rate_limit") is not null} hasCredits={root.GetObjectOrNull("credits") is not null}");
+        AppLog.Write($"Codex usage parsed planType={planType ?? "<missing>"} plan={plan ?? "<missing>"} rootKeys={SafeKeys(root)} hasRateLimit={root.GetObjectOrNull("rate_limit") is not null} hasCredits={root.GetObjectOrNull("credits") is not null}");
 
         var windows = new List<UsageWindow>();
         if (root.GetObjectOrNull("rate_limit") is { } rateLimit)
@@ -130,11 +130,11 @@ public sealed class CodexProvider : IUsageProvider
             if (ParseCredits(root) is { } credits)
             {
                 windows.Add(credits);
-                AppLog.Write($"Codex enterprise credits parsed detail='{credits.DetailText}' usedRatio={credits.UsedRatio:0.###}");
+                AppLog.Write($"Codex enterprise credits parsed hasDetail={!string.IsNullOrEmpty(credits.DetailText)} usedRatio={credits.UsedRatio:0.###}");
             }
             else
             {
-                AppLog.Write("Codex enterprise credits missing or unparseable");
+                LogCreditShape(root);
             }
         }
 
@@ -173,12 +173,14 @@ public sealed class CodexProvider : IUsageProvider
             return null;
         }
 
-        if (credits.GetStringOrNull("balance") is not { Length: > 0 } balance)
+        if (GetStringOrNumber(credits, "balance") is not { Length: > 0 } balance)
         {
             return null;
         }
 
-        var limit = root.GetObjectOrNull("spend_control")?.GetDoubleOrNull("individual_limit");
+        var limit = root.GetObjectOrNull("spend_control") is { } spendControl
+            ? GetDouble(spendControl, "individual_limit")
+            : null;
         var remaining = double.TryParse(balance, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsedBalance)
             ? parsedBalance
             : (double?)null;
@@ -193,6 +195,66 @@ public sealed class CodexProvider : IUsageProvider
             Label = "크레딧",
             DetailText = $"잔액 {FormatMoney(balance)}",
         };
+    }
+
+    private static void LogCreditShape(JsonElement root)
+    {
+        var credits = root.GetObjectOrNull("credits");
+        var spendControl = root.GetObjectOrNull("spend_control");
+        AppLog.Write("Codex enterprise credits missing or unparseable "
+            + $"creditsKeys={SafeKeys(credits)} "
+            + $"balanceKind={PropertyKind(credits, "balance")} "
+            + $"spendControlKeys={SafeKeys(spendControl)} "
+            + $"individualLimitKind={PropertyKind(spendControl, "individual_limit")}");
+    }
+
+    private static string SafeKeys(JsonElement? element)
+    {
+        if (element is not { ValueKind: JsonValueKind.Object } obj)
+        {
+            return "<none>";
+        }
+
+        var keys = obj.EnumerateObject().Select(property => property.Name).Take(24);
+        return string.Join(",", keys);
+    }
+
+    private static string PropertyKind(JsonElement? element, string property)
+        => element is { ValueKind: JsonValueKind.Object } obj && obj.TryGetProperty(property, out var value)
+            ? value.ValueKind.ToString()
+            : "<missing>";
+
+    private static string? GetStringOrNumber(JsonElement element, string property)
+    {
+        if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(property, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number when value.TryGetDecimal(out var number) => number.ToString(CultureInfo.InvariantCulture),
+            _ => null,
+        };
+    }
+
+    private static double? GetDouble(JsonElement element, string property)
+    {
+        if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(property, out var value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number))
+        {
+            return number;
+        }
+
+        return value.ValueKind == JsonValueKind.String
+               && double.TryParse(value.GetString(), NumberStyles.Number, CultureInfo.InvariantCulture, out number)
+            ? number
+            : null;
     }
 
     private static string FormatMoney(string value) => value.StartsWith('$') ? value : $"${value}";

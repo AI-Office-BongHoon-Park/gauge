@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
@@ -78,6 +77,7 @@ public sealed class ClaudeProvider : IUsageProvider
         var credentialResult = await _credentials.ReadAsync(ToolKind.ClaudeCode, cancellationToken);
         var credentials = credentialResult.Credential;
         var now = Environment.TickCount64;
+        AppLog.Write($"Claude refresh credentialStatus={credentialResult.Status} hasToken={credentials?.AccessToken is { Length: > 0 }} plan={credentials?.Plan ?? "<missing>"}");
 
         // A CLI re-login/account switch must not serve the prior account's 5-minute
         // cache. Keep only a one-way fingerprint, never the token itself.
@@ -86,6 +86,7 @@ public sealed class ClaudeProvider : IUsageProvider
             : null;
         if (_credentialFingerprintInitialized && !StringComparer.Ordinal.Equals(_credentialFingerprint, fingerprint))
         {
+            AppLog.Write("Claude credential changed: clearing cached snapshot");
             _lastSnapshot = null;
             _lastSuccessTick = 0;
             _cooldownUntilTick = 0;
@@ -96,6 +97,7 @@ public sealed class ClaudeProvider : IUsageProvider
 
         if (credentialResult.Status == CredentialReadStatus.Invalid)
         {
+            AppLog.Write("Claude refresh rejected: invalid credential");
             throw new AuthenticationRequiredException(ToolKind.ClaudeCode, HttpStatusCode.Unauthorized);
         }
 
@@ -106,6 +108,7 @@ public sealed class ClaudeProvider : IUsageProvider
         var fetchedRecently = _lastSuccessTick != 0 && now - _lastSuccessTick < MinFetchInterval.TotalMilliseconds;
         if (_lastSnapshot is not null && (inCooldown || fetchedRecently))
         {
+            AppLog.Write($"Claude refresh served from cache inCooldown={inCooldown} fetchedRecently={fetchedRecently} windows={_lastSnapshot.Windows.Count}");
             return _lastSnapshot with { Plan = credentials?.Plan ?? _lastSnapshot.Plan };
         }
 
@@ -113,6 +116,7 @@ public sealed class ClaudeProvider : IUsageProvider
         {
             // No usable token: report the plan (if known) with no windows. Don't throw,
             // so this reads as "no data yet" rather than a transient failure.
+            AppLog.Write("Claude refresh skipped: missing token");
             return new UsageSnapshot
             {
                 ToolName = ToolName,
@@ -125,6 +129,7 @@ public sealed class ClaudeProvider : IUsageProvider
         try
         {
             var windows = await FetchWindowsAsync(token, cancellationToken);
+            AppLog.Write($"Claude usage refresh succeeded windows={windows.Count}");
             _consecutive429 = 0;
             _cooldownUntilTick = 0;
             _lastSuccessTick = Environment.TickCount64;
@@ -142,25 +147,28 @@ public sealed class ClaudeProvider : IUsageProvider
             _consecutive429++;
             var cooldown = NextCooldown(_consecutive429);
             _cooldownUntilTick = Environment.TickCount64 + (long)cooldown.TotalMilliseconds;
-            Debug.WriteLine($"[Gauge] ClaudeProvider 429 (x{_consecutive429}); backing off {cooldown.TotalMinutes:0}m");
+            AppLog.Write($"Claude refresh throttled status=429 consecutive={_consecutive429} cooldownMinutes={cooldown.TotalMinutes:0}");
 
             // Keep showing the last good value if we have one; only surface a failure
             // on a cold start with nothing cached.
             if (_lastSnapshot is not null)
             {
+                AppLog.Write($"Claude refresh served cached snapshot after 429 windows={_lastSnapshot.Windows.Count}");
                 return _lastSnapshot with { Plan = credentials.Plan ?? _lastSnapshot.Plan };
             }
             throw;
         }
         catch (HttpRequestException ex) when (ex.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
         {
+            AppLog.Write($"Claude refresh auth failed: status={(int)ex.StatusCode!.Value}");
             throw new AuthenticationRequiredException(ToolKind.ClaudeCode, ex.StatusCode!.Value);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            Debug.WriteLine($"[Gauge] ClaudeProvider usage fetch failed: {ex.Message}");
+            AppLog.Write($"Claude refresh failed: {ex.GetType().Name}: {ex.Message}");
             if (_lastSnapshot is not null)
             {
+                AppLog.Write($"Claude refresh served cached snapshot after failure windows={_lastSnapshot.Windows.Count}");
                 return _lastSnapshot with { Plan = credentials.Plan ?? _lastSnapshot.Plan };
             }
             throw;
@@ -182,12 +190,15 @@ public sealed class ClaudeProvider : IUsageProvider
         request.Headers.TryAddWithoutValidation("anthropic-beta", OAuthBetaHeader);
         request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
 
+        AppLog.Write("Claude usage request started");
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        AppLog.Write($"Claude usage response status={(int)response.StatusCode}");
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var document = await JsonDocument.ParseAsync(stream, default, cancellationToken);
         var root = document.RootElement;
+        AppLog.Write($"Claude usage parsed rootKeys={SafeKeys(root)} hasFiveHour={root.GetObjectOrNull("five_hour") is not null} hasSevenDay={root.GetObjectOrNull("seven_day") is not null}");
 
         var windows = new List<UsageWindow>();
         if (ParseWindow(root, "five_hour", UsageWindowType.FiveHour, "5시간") is { } fiveHour)
@@ -200,6 +211,17 @@ public sealed class ClaudeProvider : IUsageProvider
         }
 
         return windows;
+    }
+
+    private static string SafeKeys(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return "<none>";
+        }
+
+        var keys = element.EnumerateObject().Select(property => property.Name).Take(24);
+        return string.Join(",", keys);
     }
 
     /// <summary>

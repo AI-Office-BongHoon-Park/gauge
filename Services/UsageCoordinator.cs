@@ -133,6 +133,12 @@ public sealed class UsageCoordinator : IDisposable
             Interlocked.Exchange(ref _lastRefreshStartedTick, Environment.TickCount64);
             var results = await _usageService.GetAllSnapshotsAsync(cancellationToken);
             AppLog.Write($"Usage refresh providers finished success={results.Count(r => r.Succeeded)} failed={results.Count(r => !r.Succeeded)}");
+            foreach (var result in results)
+            {
+                AppLog.Write(result.Succeeded
+                    ? $"Usage provider result tool={result.ToolName} windows={result.Snapshot!.Windows.Count} plan={result.Snapshot.Plan ?? "<missing>"}"
+                    : $"Usage provider result tool={result.ToolName} error={result.Error!.GetType().Name}: {result.Error.Message}");
+            }
             MergeIntoCache(results);
             ReportAuthenticationFailures(results);
             EmitState();
