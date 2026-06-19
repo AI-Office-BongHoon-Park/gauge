@@ -139,7 +139,9 @@ public sealed partial class UsageViewModel : ObservableObject
             if (tool.Snapshot is { Windows.Count: > 0 } snapshot)
             {
                 var highest = snapshot.Windows.Max(w => w.UsedRatio);
-                parts.Add($"{tool.ToolName} {highest * 100:0}%");
+                var detail = snapshot.Windows.FirstOrDefault(w => !string.IsNullOrWhiteSpace(w.DetailText))?.DetailText;
+                var text = detail ?? $"{highest * 100:0}%";
+                parts.Add($"{tool.ToolName} {text}");
             }
             else
             {

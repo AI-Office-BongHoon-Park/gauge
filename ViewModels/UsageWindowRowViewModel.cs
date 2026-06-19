@@ -40,7 +40,7 @@ public sealed partial class UsageWindowRowViewModel : ObservableObject
     public void Update(UsageWindow window)
     {
         Percent = Math.Clamp(window.UsedRatio, 0.0, 1.0) * 100.0;
-        PercentText = $"{window.UsedRatio * 100:0}%";
+        PercentText = window.DetailText ?? $"{window.UsedRatio * 100:0}%";
         Level = UsageLevelClassifier.Classify(window.UsedRatio);
         ResetText = FormatReset(window.ResetTime);
     }

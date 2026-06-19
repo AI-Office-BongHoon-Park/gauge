@@ -27,4 +27,7 @@ public sealed record UsageWindow
 
     /// <summary>The denominator used to compute <see cref="UsedRatio"/>, if available.</summary>
     public long? LimitTokens { get; init; }
+
+    /// <summary>Optional display text when the provider exposes a non-percent value.</summary>
+    public string? DetailText { get; init; }
 }
