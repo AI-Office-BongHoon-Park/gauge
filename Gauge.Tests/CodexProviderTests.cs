@@ -25,7 +25,7 @@ public sealed class CodexProviderTests
         Assert.Equal("Enterprise", snapshot.Plan);
         var window = Assert.Single(snapshot.Windows);
         Assert.Equal(UsageWindowType.BillingCycle, window.Type);
-        Assert.Equal("잔액 $42.50", window.DetailText);
+        Assert.Equal("잔액 $42.50 / $100", window.DetailText);
         Assert.Equal(0.575, window.UsedRatio, 3);
     }
 
@@ -44,7 +44,7 @@ public sealed class CodexProviderTests
         var snapshot = await provider.GetSnapshotAsync(default);
 
         var window = Assert.Single(snapshot.Windows);
-        Assert.Equal("잔액 $25", window.DetailText);
+        Assert.Equal("잔액 $25 / $100", window.DetailText);
         Assert.Equal(0.75, window.UsedRatio, 3);
     }
 
@@ -68,6 +68,28 @@ public sealed class CodexProviderTests
         var window = Assert.Single(snapshot.Windows);
         Assert.Equal("$25 / $100", window.DetailText);
         Assert.Equal(0.25, window.UsedRatio, 3);
+    }
+
+    [Fact]
+    public async Task ParsesSpendControlLimitObject()
+    {
+        const string json = """
+        {
+          "plan_type": "enterprise",
+          "credits": { "balance": null },
+          "spend_control": {
+            "reached": false,
+            "individual_limit": { "remaining": 40, "limit": 100 }
+          }
+        }
+        """;
+        var provider = new CodexProvider(new HttpClient(new StubHandler(json)), Source());
+
+        var snapshot = await provider.GetSnapshotAsync(default);
+
+        var window = Assert.Single(snapshot.Windows);
+        Assert.Equal("잔액 $40 / $100", window.DetailText);
+        Assert.Equal(0.6, window.UsedRatio, 3);
     }
 
     private static ICredentialSource Source() => new StubSource(

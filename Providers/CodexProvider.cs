@@ -179,13 +179,16 @@ public sealed class CodexProvider : IUsageProvider
             var usedRatio = limit is > 0 && remaining is { } value
                 ? Math.Clamp((limit.Value - value) / limit.Value, 0.0, 1.0)
                 : 0.0;
+            var detail = limit is > 0
+                ? $"잔액 {FormatMoney(balance)} / {FormatMoney(limit.Value.ToString(CultureInfo.InvariantCulture))}"
+                : $"잔액 {FormatMoney(balance)}";
 
             return new UsageWindow
             {
                 Type = UsageWindowType.BillingCycle,
                 UsedRatio = usedRatio,
                 Label = "크레딧",
-                DetailText = $"잔액 {FormatMoney(balance)}",
+                DetailText = detail,
             };
         }
 
@@ -214,10 +217,12 @@ public sealed class CodexProvider : IUsageProvider
                     ? Math.Clamp((limit.Value - r) / limit.Value, 0.0, 1.0)
                     : reached ? 1.0 : 0.0;
 
-        var detail = remaining is { } rem
-            ? $"잔액 {FormatMoney(rem.ToString(CultureInfo.InvariantCulture))}"
-            : used is { } u2 && limit is { } l2
-                ? $"{FormatMoney(u2.ToString(CultureInfo.InvariantCulture))} / {FormatMoney(l2.ToString(CultureInfo.InvariantCulture))}"
+        var detail = remaining is { } rem && limit is { } l1
+            ? $"잔액 {FormatMoney(rem.ToString(CultureInfo.InvariantCulture))} / {FormatMoney(l1.ToString(CultureInfo.InvariantCulture))}"
+            : remaining is { } remOnly
+                ? $"잔액 {FormatMoney(remOnly.ToString(CultureInfo.InvariantCulture))}"
+                : used is { } u2 && limit is { } l2
+                    ? $"{FormatMoney(u2.ToString(CultureInfo.InvariantCulture))} / {FormatMoney(l2.ToString(CultureInfo.InvariantCulture))}"
                 : reached ? "한도 도달" : "한도";
 
         if (percent is null && limit is null && used is null && remaining is null
@@ -245,6 +250,7 @@ public sealed class CodexProvider : IUsageProvider
             + $"spendControlKeys={SafeKeys(spendControl)} "
             + $"individualLimitKind={PropertyKind(spendControl, "individual_limit")} "
             + $"indivisualLimitKind={PropertyKind(spendControl, "indivisual_limit")} "
+            + $"individualLimitShape={ObjectShape(spendControl, "individual_limit")} "
             + $"indivisualLimitShape={ObjectShape(spendControl, "indivisual_limit")}");
     }
 

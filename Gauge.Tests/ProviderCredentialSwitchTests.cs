@@ -33,6 +33,20 @@ public sealed class ProviderCredentialSwitchTests
         Assert.Equal(ToolKind.ClaudeCode, error.Tool);
     }
 
+    [Fact]
+    public async Task ClaudeParsesNestedWindowUtilization()
+    {
+        var json = """{"five_hour":{"window":{"used_percent":"12.5","reset_at":"2026-07-01T00:00:00Z"}}}""";
+        var provider = new ClaudeProvider(new HttpClient(new CountingHandler(json: json)), new MutableSource("token"));
+
+        var snapshot = await provider.GetSnapshotAsync(default);
+
+        var window = Assert.Single(snapshot.Windows);
+        Assert.Equal(UsageWindowType.FiveHour, window.Type);
+        Assert.Equal(0.125, window.UsedRatio, 3);
+        Assert.NotNull(window.ResetTime);
+    }
+
     private sealed class MutableSource(string token) : ICredentialSource
     {
         public string Token { get; set; } = token;
@@ -46,7 +60,7 @@ public sealed class ProviderCredentialSwitchTests
             });
     }
 
-    private sealed class CountingHandler(HttpStatusCode statusCode = HttpStatusCode.OK) : HttpMessageHandler
+    private sealed class CountingHandler(HttpStatusCode statusCode = HttpStatusCode.OK, string json = "{\"five_hour\":{\"utilization\":10}}") : HttpMessageHandler
     {
         public int CallCount { get; private set; }
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -54,7 +68,7 @@ public sealed class ProviderCredentialSwitchTests
             CallCount++;
             return Task.FromResult(new HttpResponseMessage(statusCode)
             {
-                Content = new StringContent("{\"five_hour\":{\"utilization\":10}}", Encoding.UTF8, "application/json"),
+                Content = new StringContent(json, Encoding.UTF8, "application/json"),
             });
         }
     }

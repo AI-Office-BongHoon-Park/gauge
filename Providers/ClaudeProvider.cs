@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Security.Cryptography;
 using System.Text;
+using System.Globalization;
 using Gauge.Models;
 using Gauge.Providers.Internal;
 using Gauge.Services;
@@ -198,7 +199,14 @@ public sealed class ClaudeProvider : IUsageProvider
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var document = await JsonDocument.ParseAsync(stream, default, cancellationToken);
         var root = document.RootElement;
-        AppLog.Write($"Claude usage parsed rootKeys={SafeKeys(root)} hasFiveHour={root.GetObjectOrNull("five_hour") is not null} hasSevenDay={root.GetObjectOrNull("seven_day") is not null}");
+        AppLog.Write("Claude usage parsed "
+            + $"rootKeys={SafeKeys(root)} "
+            + $"fiveHourKind={PropertyKind(root, "five_hour")} "
+            + $"fiveHourShape={ObjectShape(root, "five_hour")} "
+            + $"sevenDayKind={PropertyKind(root, "seven_day")} "
+            + $"sevenDayShape={ObjectShape(root, "seven_day")} "
+            + $"spendKind={PropertyKind(root, "spend")} "
+            + $"spendShape={ObjectShape(root, "spend")}");
 
         var windows = new List<UsageWindow>();
         if (ParseWindow(root, "five_hour", UsageWindowType.FiveHour, "5시간") is { } fiveHour)
@@ -224,14 +232,47 @@ public sealed class ClaudeProvider : IUsageProvider
         return string.Join(",", keys);
     }
 
+    private static string PropertyKind(JsonElement element, string property)
+        => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value)
+            ? value.ValueKind.ToString()
+            : "<missing>";
+
+    private static string ObjectShape(JsonElement element, string property)
+    {
+        if (element.ValueKind != JsonValueKind.Object
+            || !element.TryGetProperty(property, out var value)
+            || value.ValueKind != JsonValueKind.Object)
+        {
+            return "<none>";
+        }
+
+        var parts = value.EnumerateObject()
+            .Take(24)
+            .Select(item => $"{item.Name}:{item.Value.ValueKind}");
+        return string.Join(",", parts);
+    }
+
     /// <summary>
     /// Parses one window object: <c>{ "utilization": 0–100, "resets_at": ISO8601 }</c>.
     /// A null/absent object (or null utilization) means the window has no data and is omitted.
     /// </summary>
     private static UsageWindow? ParseWindow(JsonElement root, string property, UsageWindowType type, string label)
     {
-        if (root.GetObjectOrNull(property) is not { } window
-            || window.GetDoubleOrNull("utilization") is not { } utilization)
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty(property, out var window))
+        {
+            return null;
+        }
+
+        var utilization = GetDouble(window, "utilization", "used_percent", "percent_used", "percentage", "percent");
+        var nested = window.ValueKind == JsonValueKind.Object && utilization is null
+            ? FirstObject(window)
+            : null;
+        if (utilization is null && nested is { } nestedObject)
+        {
+            utilization = GetDouble(nestedObject, "utilization", "used_percent", "percent_used", "percentage", "percent");
+        }
+
+        if (utilization is not { } percent)
         {
             return null;
         }
@@ -239,9 +280,56 @@ public sealed class ClaudeProvider : IUsageProvider
         return new UsageWindow
         {
             Type = type,
-            UsedRatio = Math.Clamp(utilization / 100.0, 0.0, 1.0),
+            UsedRatio = Math.Clamp(percent / 100.0, 0.0, 1.0),
             Label = label,
-            ResetTime = window.GetDateTimeOffsetOrNull("resets_at"),
+            ResetTime = GetResetTime(window) ?? (nested is { } nestedWindow ? GetResetTime(nestedWindow) : null),
         };
+    }
+
+    private static JsonElement? FirstObject(JsonElement element)
+    {
+        foreach (var property in element.EnumerateObject())
+        {
+            if (property.Value.ValueKind == JsonValueKind.Object)
+            {
+                return property.Value;
+            }
+        }
+
+        return null;
+    }
+
+    private static DateTimeOffset? GetResetTime(JsonElement element)
+        => element.GetDateTimeOffsetOrNull("resets_at")
+           ?? element.GetDateTimeOffsetOrNull("reset_at")
+           ?? element.GetDateTimeOffsetOrNull("reset_time");
+
+    private static double? GetDouble(JsonElement element, params string[] properties)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        foreach (var property in properties)
+        {
+            if (!element.TryGetProperty(property, out var value))
+            {
+                continue;
+            }
+
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number))
+            {
+                return number;
+            }
+
+            if (value.ValueKind == JsonValueKind.String
+                && double.TryParse(value.GetString(), NumberStyles.Number, CultureInfo.InvariantCulture, out number))
+            {
+                return number;
+            }
+        }
+
+        return null;
     }
 }
