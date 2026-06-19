@@ -168,32 +168,70 @@ public sealed class CodexProvider : IUsageProvider
 
     private static UsageWindow? ParseCredits(JsonElement root)
     {
-        if (root.GetObjectOrNull("credits") is not { } credits)
+        var spendControl = root.GetObjectOrNull("spend_control");
+        if (root.GetObjectOrNull("credits") is { } credits
+            && GetStringOrNumber(credits, "balance") is { Length: > 0 } balance)
+        {
+            var limit = spendControl is { } control ? GetDouble(control, "individual_limit", "indivisual_limit") : null;
+            var remaining = double.TryParse(balance, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsedBalance)
+                ? parsedBalance
+                : (double?)null;
+            var usedRatio = limit is > 0 && remaining is { } value
+                ? Math.Clamp((limit.Value - value) / limit.Value, 0.0, 1.0)
+                : 0.0;
+
+            return new UsageWindow
+            {
+                Type = UsageWindowType.BillingCycle,
+                UsedRatio = usedRatio,
+                Label = "크레딧",
+                DetailText = $"잔액 {FormatMoney(balance)}",
+            };
+        }
+
+        if (TryGetProperty(spendControl, out var limitObject, "individual_limit", "indivisual_limit")
+            && limitObject.ValueKind == JsonValueKind.Object)
+        {
+            return ParseLimitObject(limitObject, spendControl);
+        }
+
+        return null;
+    }
+
+    private static UsageWindow? ParseLimitObject(JsonElement limitObject, JsonElement? spendControl)
+    {
+        var percent = GetDouble(limitObject, "used_percent", "percent_used", "utilization", "usedPercentage");
+        var limit = GetDouble(limitObject, "limit", "total", "amount", "max", "hard_limit", "soft_limit");
+        var used = GetDouble(limitObject, "used", "current", "consumed", "spend", "spent");
+        var remaining = GetDouble(limitObject, "remaining", "balance", "available");
+        var reached = spendControl is { } control && GetBool(control, "reached") == true;
+
+        var usedRatio = percent is { } p
+            ? Math.Clamp(p / 100.0, 0.0, 1.0)
+            : limit is > 0 && used is { } u
+                ? Math.Clamp(u / limit.Value, 0.0, 1.0)
+                : limit is > 0 && remaining is { } r
+                    ? Math.Clamp((limit.Value - r) / limit.Value, 0.0, 1.0)
+                    : reached ? 1.0 : 0.0;
+
+        var detail = remaining is { } rem
+            ? $"잔액 {FormatMoney(rem.ToString(CultureInfo.InvariantCulture))}"
+            : used is { } u2 && limit is { } l2
+                ? $"{FormatMoney(u2.ToString(CultureInfo.InvariantCulture))} / {FormatMoney(l2.ToString(CultureInfo.InvariantCulture))}"
+                : reached ? "한도 도달" : "한도";
+
+        if (percent is null && limit is null && used is null && remaining is null
+            && (spendControl is not { } control2 || GetBool(control2, "reached") is null))
         {
             return null;
         }
-
-        if (GetStringOrNumber(credits, "balance") is not { Length: > 0 } balance)
-        {
-            return null;
-        }
-
-        var limit = root.GetObjectOrNull("spend_control") is { } spendControl
-            ? GetDouble(spendControl, "individual_limit")
-            : null;
-        var remaining = double.TryParse(balance, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsedBalance)
-            ? parsedBalance
-            : (double?)null;
-        var usedRatio = limit is > 0 && remaining is { } value
-            ? Math.Clamp((limit.Value - value) / limit.Value, 0.0, 1.0)
-            : 0.0;
 
         return new UsageWindow
         {
             Type = UsageWindowType.BillingCycle,
             UsedRatio = usedRatio,
             Label = "크레딧",
-            DetailText = $"잔액 {FormatMoney(balance)}",
+            DetailText = detail,
         };
     }
 
@@ -205,7 +243,9 @@ public sealed class CodexProvider : IUsageProvider
             + $"creditsKeys={SafeKeys(credits)} "
             + $"balanceKind={PropertyKind(credits, "balance")} "
             + $"spendControlKeys={SafeKeys(spendControl)} "
-            + $"individualLimitKind={PropertyKind(spendControl, "individual_limit")}");
+            + $"individualLimitKind={PropertyKind(spendControl, "individual_limit")} "
+            + $"indivisualLimitKind={PropertyKind(spendControl, "indivisual_limit")} "
+            + $"indivisualLimitShape={ObjectShape(spendControl, "indivisual_limit")}");
     }
 
     private static string SafeKeys(JsonElement? element)
@@ -224,6 +264,19 @@ public sealed class CodexProvider : IUsageProvider
             ? value.ValueKind.ToString()
             : "<missing>";
 
+    private static string ObjectShape(JsonElement? element, string property)
+    {
+        if (!TryGetProperty(element, out var value, property) || value.ValueKind != JsonValueKind.Object)
+        {
+            return "<none>";
+        }
+
+        var parts = value.EnumerateObject()
+            .Take(24)
+            .Select(item => $"{item.Name}:{item.Value.ValueKind}");
+        return string.Join(",", parts);
+    }
+
     private static string? GetStringOrNumber(JsonElement element, string property)
     {
         if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(property, out var value))
@@ -239,9 +292,9 @@ public sealed class CodexProvider : IUsageProvider
         };
     }
 
-    private static double? GetDouble(JsonElement element, string property)
+    private static double? GetDouble(JsonElement element, params string[] properties)
     {
-        if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(property, out var value))
+        if (!TryGetProperty(element, out var value, properties))
         {
             return null;
         }
@@ -255,6 +308,30 @@ public sealed class CodexProvider : IUsageProvider
                && double.TryParse(value.GetString(), NumberStyles.Number, CultureInfo.InvariantCulture, out number)
             ? number
             : null;
+    }
+
+    private static bool? GetBool(JsonElement element, string property)
+        => element.ValueKind == JsonValueKind.Object
+           && element.TryGetProperty(property, out var value)
+           && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean()
+            : null;
+
+    private static bool TryGetProperty(JsonElement? element, out JsonElement value, params string[] properties)
+    {
+        if (element is { ValueKind: JsonValueKind.Object } obj)
+        {
+            foreach (var property in properties)
+            {
+                if (obj.TryGetProperty(property, out value))
+                {
+                    return true;
+                }
+            }
+        }
+
+        value = default;
+        return false;
     }
 
     private static string FormatMoney(string value) => value.StartsWith('$') ? value : $"${value}";

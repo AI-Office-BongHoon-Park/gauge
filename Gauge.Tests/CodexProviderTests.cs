@@ -48,6 +48,28 @@ public sealed class CodexProviderTests
         Assert.Equal(0.75, window.UsedRatio, 3);
     }
 
+    [Fact]
+    public async Task ParsesMisspelledSpendControlLimitObject()
+    {
+        const string json = """
+        {
+          "plan_type": "enterprise",
+          "credits": { "balance": null },
+          "spend_control": {
+            "reached": false,
+            "indivisual_limit": { "used": 25, "limit": 100 }
+          }
+        }
+        """;
+        var provider = new CodexProvider(new HttpClient(new StubHandler(json)), Source());
+
+        var snapshot = await provider.GetSnapshotAsync(default);
+
+        var window = Assert.Single(snapshot.Windows);
+        Assert.Equal("$25 / $100", window.DetailText);
+        Assert.Equal(0.25, window.UsedRatio, 3);
+    }
+
     private static ICredentialSource Source() => new StubSource(
         new CredentialReadResult
         {
