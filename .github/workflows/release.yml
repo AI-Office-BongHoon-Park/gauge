@@ -56,15 +56,19 @@ jobs:
       - name: Create draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        # Creates a DRAFT release with the assets and auto-generated notes as a
-        # starting point — final notes and publishing are done manually. Idempotent: if a
-        # release/draft for this tag already exists (e.g. created locally by release.ps1,
-        # whose tag push also triggers this workflow), just replace the assets instead of
-        # failing.
+        # Draft releases are not reliably found by `gh release view`; list through the
+        # API so repeated tag pushes do not create duplicate drafts.
         shell: pwsh
         run: |
-          if (gh release view "$env:RELEASE_TAG" --json databaseId | Out-Null) {
+          $releases = @(gh api "repos/$env:GITHUB_REPOSITORY/releases" | ConvertFrom-Json)
+          $matches = @($releases | Where-Object { $_.tag_name -eq $env:RELEASE_TAG })
+          $published = @($matches | Where-Object { -not $_.draft })
+
+          if ($published.Count -gt 0) {
             gh release upload "$env:RELEASE_TAG" dist/GaugeSetup-win-x64.exe dist/GaugePortable-win-x64.zip --clobber
           } else {
+            foreach ($draft in @($matches | Where-Object { $_.draft })) {
+              gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/releases/$($draft.id)"
+            }
             gh release create "$env:RELEASE_TAG" dist/GaugeSetup-win-x64.exe dist/GaugePortable-win-x64.zip --title "$env:RELEASE_TAG" --draft --generate-notes
           }
