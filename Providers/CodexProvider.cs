@@ -1,10 +1,11 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using Gauge.Models;
 using Gauge.Providers.Internal;
 using Gauge.Services;
-using System.Net;
 
 namespace Gauge.Providers;
 
@@ -117,6 +118,11 @@ public sealed class CodexProvider : IUsageProvider
             }
         }
 
+        if ((windows.Count == 0 || plan == "Enterprise") && ParseCredits(root) is { } credits)
+        {
+            windows.Add(credits);
+        }
+
         return (plan, windows);
     }
 
@@ -143,6 +149,37 @@ public sealed class CodexProvider : IUsageProvider
             ResetTime = resetTime,
         };
     }
+
+    private static UsageWindow? ParseCredits(JsonElement root)
+    {
+        if (root.GetObjectOrNull("credits") is not { } credits)
+        {
+            return null;
+        }
+
+        if (credits.GetStringOrNull("balance") is not { Length: > 0 } balance)
+        {
+            return null;
+        }
+
+        var limit = root.GetObjectOrNull("spend_control")?.GetDoubleOrNull("individual_limit");
+        var remaining = double.TryParse(balance, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsedBalance)
+            ? parsedBalance
+            : (double?)null;
+        var usedRatio = limit is > 0 && remaining is { } value
+            ? Math.Clamp((limit.Value - value) / limit.Value, 0.0, 1.0)
+            : 0.0;
+
+        return new UsageWindow
+        {
+            Type = UsageWindowType.BillingCycle,
+            UsedRatio = usedRatio,
+            Label = "크레딧",
+            DetailText = $"잔액 {FormatMoney(balance)}",
+        };
+    }
+
+    private static string FormatMoney(string value) => value.StartsWith('$') ? value : $"${value}";
 
     private static string? MapPlan(string? planType) => planType?.ToLowerInvariant() switch
     {
