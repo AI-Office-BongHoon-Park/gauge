@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http;
@@ -41,15 +40,18 @@ public sealed class CodexProvider : IUsageProvider
     {
         var credentialResult = await _credentials.ReadAsync(ToolKind.Codex, cancellationToken);
         var credentials = credentialResult.Credential;
+        AppLog.Write($"Codex refresh credentialStatus={credentialResult.Status} hasToken={credentials?.AccessToken is { Length: > 0 }} hasAccountId={!string.IsNullOrEmpty(credentials?.AccountId)}");
 
         if (credentialResult.Status == CredentialReadStatus.Invalid)
         {
+            AppLog.Write("Codex refresh rejected: invalid credential");
             throw new AuthenticationRequiredException(ToolKind.Codex, HttpStatusCode.Unauthorized);
         }
 
         // No token (not logged in): a legitimate "no data yet" state, not a failure.
         if (credentials?.AccessToken is not { Length: > 0 } token)
         {
+            AppLog.Write("Codex refresh skipped: missing token");
             return new UsageSnapshot
             {
                 ToolName = ToolName,
@@ -78,9 +80,10 @@ public sealed class CodexProvider : IUsageProvider
         {
             if (ex is HttpRequestException { StatusCode: HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden } httpError)
             {
+                AppLog.Write($"Codex refresh auth failed: status={(int)httpError.StatusCode!.Value}");
                 throw new AuthenticationRequiredException(ToolKind.Codex, httpError.StatusCode!.Value);
             }
-            Debug.WriteLine($"[Gauge] CodexProvider usage fetch failed: {ex.Message}");
+            AppLog.Write($"Codex refresh failed: {ex.GetType().Name}: {ex.Message}");
             throw;
         }
     }
@@ -96,14 +99,18 @@ public sealed class CodexProvider : IUsageProvider
             request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", accountId);
         }
 
+        AppLog.Write($"Codex usage request started accountHeader={!string.IsNullOrEmpty(accountId)}");
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        AppLog.Write($"Codex usage response status={(int)response.StatusCode}");
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var document = await JsonDocument.ParseAsync(stream, default, cancellationToken);
         var root = document.RootElement;
 
-        var plan = MapPlan(root.GetStringOrNull("plan_type"));
+        var planType = root.GetStringOrNull("plan_type");
+        var plan = MapPlan(planType);
+        AppLog.Write($"Codex usage parsed planType={planType ?? "<missing>"} plan={plan ?? "<missing>"} hasRateLimit={root.GetObjectOrNull("rate_limit") is not null} hasCredits={root.GetObjectOrNull("credits") is not null}");
 
         var windows = new List<UsageWindow>();
         if (root.GetObjectOrNull("rate_limit") is { } rateLimit)
@@ -118,11 +125,20 @@ public sealed class CodexProvider : IUsageProvider
             }
         }
 
-        if ((windows.Count == 0 || plan == "Enterprise") && ParseCredits(root) is { } credits)
+        if (windows.Count == 0 || plan == "Enterprise")
         {
-            windows.Add(credits);
+            if (ParseCredits(root) is { } credits)
+            {
+                windows.Add(credits);
+                AppLog.Write($"Codex enterprise credits parsed detail='{credits.DetailText}' usedRatio={credits.UsedRatio:0.###}");
+            }
+            else
+            {
+                AppLog.Write("Codex enterprise credits missing or unparseable");
+            }
         }
 
+        AppLog.Write($"Codex usage refresh succeeded windows={windows.Count}");
         return (plan, windows);
     }
 
