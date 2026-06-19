@@ -61,9 +61,10 @@ jobs:
         # release/draft for this tag already exists (e.g. created locally by release.ps1,
         # whose tag push also triggers this workflow), just replace the assets instead of
         # failing.
-        run: >
-          gh release create "$env:RELEASE_TAG" dist/GaugeSetup-win-x64.exe
-          dist/GaugePortable-win-x64.zip
-          --title "$env:RELEASE_TAG" --draft --generate-notes
-          || gh release upload "$env:RELEASE_TAG" dist/GaugeSetup-win-x64.exe
-          dist/GaugePortable-win-x64.zip --clobber
+        shell: pwsh
+        run: |
+          if (gh release view "$env:RELEASE_TAG" --json databaseId | Out-Null) {
+            gh release upload "$env:RELEASE_TAG" dist/GaugeSetup-win-x64.exe dist/GaugePortable-win-x64.zip --clobber
+          } else {
+            gh release create "$env:RELEASE_TAG" dist/GaugeSetup-win-x64.exe dist/GaugePortable-win-x64.zip --title "$env:RELEASE_TAG" --draft --generate-notes
+          }
