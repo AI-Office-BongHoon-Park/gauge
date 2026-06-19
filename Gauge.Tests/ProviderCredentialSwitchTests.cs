@@ -47,6 +47,20 @@ public sealed class ProviderCredentialSwitchTests
         Assert.NotNull(window.ResetTime);
     }
 
+    [Fact]
+    public async Task ClaudeParsesSpendWhenWindowsAreNull()
+    {
+        var json = """{"five_hour":null,"seven_day":null,"spend":{"used":25,"limit":{"amount":100},"percent":25,"severity":"ok","enabled":true,"disabled_reason":null}}""";
+        var provider = new ClaudeProvider(new HttpClient(new CountingHandler(json: json)), new MutableSource("token"));
+
+        var snapshot = await provider.GetSnapshotAsync(default);
+
+        var window = Assert.Single(snapshot.Windows);
+        Assert.Equal(UsageWindowType.BillingCycle, window.Type);
+        Assert.Equal("잔액 $75 / $100", window.DetailText);
+        Assert.Equal(0.25, window.UsedRatio, 3);
+    }
+
     private sealed class MutableSource(string token) : ICredentialSource
     {
         public string Token { get; set; } = token;

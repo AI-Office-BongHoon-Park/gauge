@@ -206,7 +206,8 @@ public sealed class ClaudeProvider : IUsageProvider
             + $"sevenDayKind={PropertyKind(root, "seven_day")} "
             + $"sevenDayShape={ObjectShape(root, "seven_day")} "
             + $"spendKind={PropertyKind(root, "spend")} "
-            + $"spendShape={ObjectShape(root, "spend")}");
+            + $"spendShape={ObjectShape(root, "spend")} "
+            + $"spendLimitShape={ObjectShape(root.GetObjectOrNull("spend"), "limit")}");
 
         var windows = new List<UsageWindow>();
         if (ParseWindow(root, "five_hour", UsageWindowType.FiveHour, "5시간") is { } fiveHour)
@@ -216,6 +217,10 @@ public sealed class ClaudeProvider : IUsageProvider
         if (ParseWindow(root, "seven_day", UsageWindowType.Weekly, "주간") is { } weekly)
         {
             windows.Add(weekly);
+        }
+        if (windows.Count == 0 && ParseSpend(root) is { } spend)
+        {
+            windows.Add(spend);
         }
 
         return windows;
@@ -237,10 +242,10 @@ public sealed class ClaudeProvider : IUsageProvider
             ? value.ValueKind.ToString()
             : "<missing>";
 
-    private static string ObjectShape(JsonElement element, string property)
+    private static string ObjectShape(JsonElement? element, string property)
     {
-        if (element.ValueKind != JsonValueKind.Object
-            || !element.TryGetProperty(property, out var value)
+        if (element is not { ValueKind: JsonValueKind.Object } obj
+            || !obj.TryGetProperty(property, out var value)
             || value.ValueKind != JsonValueKind.Object)
         {
             return "<none>";
@@ -284,6 +289,44 @@ public sealed class ClaudeProvider : IUsageProvider
             Label = label,
             ResetTime = GetResetTime(window) ?? (nested is { } nestedWindow ? GetResetTime(nestedWindow) : null),
         };
+    }
+
+    private static UsageWindow? ParseSpend(JsonElement root)
+    {
+        if (root.GetObjectOrNull("spend") is not { } spend
+            || GetDouble(spend, "percent") is not { } percent)
+        {
+            return null;
+        }
+
+        var used = GetDouble(spend, "used");
+        var limit = GetSpendLimit(spend);
+        var remaining = limit is { } l && used is { } u ? Math.Max(0, l - u) : (double?)null;
+        var detail = remaining is { } r && limit is { } total
+            ? $"잔액 {FormatMoney(r)} / {FormatMoney(total)}"
+            : used is { } spent && limit is { } totalOnly
+                ? $"{FormatMoney(spent)} / {FormatMoney(totalOnly)}"
+                : null;
+
+        return new UsageWindow
+        {
+            Type = UsageWindowType.BillingCycle,
+            UsedRatio = Math.Clamp(percent / 100.0, 0.0, 1.0),
+            Label = "예산",
+            DetailText = detail,
+        };
+    }
+
+    private static double? GetSpendLimit(JsonElement spend)
+    {
+        if (GetDouble(spend, "limit") is { } direct)
+        {
+            return direct;
+        }
+
+        return spend.GetObjectOrNull("limit") is { } limit
+            ? GetDouble(limit, "amount", "value", "usd", "limit", "total", "hard_limit", "soft_limit")
+            : null;
     }
 
     private static JsonElement? FirstObject(JsonElement element)
@@ -332,4 +375,6 @@ public sealed class ClaudeProvider : IUsageProvider
 
         return null;
     }
+
+    private static string FormatMoney(double value) => $"${value:0.##}";
 }
